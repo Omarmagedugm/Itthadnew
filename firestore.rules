@@ -1,0 +1,174 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isEmailVerified() { return request.auth.token.email_verified == true; }
+    function isAdmin() { 
+      // Bootstrap admins
+      return isSignedIn() && (
+        request.auth.token.get('email', '').lower() == 'copyrightofficialco@gmail.com' ||
+        request.auth.token.get('email', '').lower() == 'omarmagedugm@gmail.com' || 
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isBootstrapAdmin(userId) {
+      return isOwner(userId) && (
+        request.auth.token.get('email', '').lower() == 'copyrightofficialco@gmail.com' ||
+        request.auth.token.get('email', '').lower() == 'omarmagedugm@gmail.com'
+      );
+    }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // User Profile Validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'role']) &&
+             data.uid is string && data.uid.size() <= 128 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.role in ['user', 'admin', 'superadmin', 'moderator', 'editor', 'verified'] &&
+             (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 500)) &&
+             (!('location' in data) || (data.location is string && data.location.size() <= 100)) &&
+             (!('joinDate' in data) || (data.joinDate is string && data.joinDate.size() <= 20));
+    }
+
+    match /live_comments/{commentId} {
+      allow read: if true; // Allow everyone to see the chat
+      allow create: if isSignedIn() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      request.resource.data.text is string;
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(incoming()) && (incoming().role == 'user' || isBootstrapAdmin(userId));
+      allow update: if (
+        isOwner(userId) && 
+        isValidUser(incoming()) && 
+        (incoming().role == existing().role || isBootstrapAdmin(userId)) &&
+        incoming().uid == userId &&
+        incoming().email == existing().email
+      ) || isAdmin();
+      allow list: if isAdmin();
+    }
+
+    // App Settings
+    match /settings/{settingId} {
+      allow read: if true; // Publicly readable for app logo/name
+      allow write: if isAdmin();
+    }
+
+    // Media
+    match /media/{mediaId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // News
+    function isValidNews(data) {
+      return data.title is string && data.title.size() <= 200 &&
+             (!('content' in data) || (data.content is string && data.content.size() <= 50000)) &&
+             (!('author' in data) || (data.author is string));
+    }
+    match /news/{newsId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidNews(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // Matches
+    match /matches/{matchId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Clubs Data
+    match /clubs/{clubId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /club_stats/{docId} { allow read: if true; allow write: if isAdmin(); }
+    match /club_titles/{docId} { allow read: if true; allow write: if isAdmin(); }
+    match /club_timeline/{docId} { allow read: if true; allow write: if isAdmin(); }
+    match /club_stadiums/{docId} { allow read: if true; allow write: if isAdmin(); }
+
+    // Polls
+    match /polls/{pollId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isSignedIn() && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['votes', 'voters', 'voterChoices'])
+      );
+    }
+
+    // Predictions
+    match /predictions/{predictionId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // Fan Posts
+    match /fan_posts/{postId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        (request.resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'image', 'location', 'poll'])) ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'likedBy', 'poll', 'commentsCount']))
+      );
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isSignedIn();
+        allow update: if isSignedIn() && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text']);
+        allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      }
+    }
+
+    // Fan Comments (Legacy or top-level)
+    match /fan_comments/{commentId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // Live Comments Management
+    match /live_comments/{commentId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text']);
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+    // Products
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Orders
+    match /orders/{orderId} {
+      allow read: if isSignedIn() && (request.auth.uid == resource.data.userId || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only manageable through Firebase Console or specific server scripts
+    }
+  }
+}
